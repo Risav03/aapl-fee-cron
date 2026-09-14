@@ -1,0 +1,22 @@
+{
+  "name": "aapl-fee-cron",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch src/index.ts",
+    "start": "bun src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@coinbase/cdp-sdk": "^1.51.0",
+    "@elysiajs/cron": "^1.4.0",
+    "dotenv": "^17.2.3",
+    "elysia": "^1.4.10",
+    "viem": "^2.46.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.11",
+    "typescript": "^5.9.3"
+  }
+}
