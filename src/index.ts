@@ -6,6 +6,15 @@ import { isSweepRunning, runSweep } from "./job.ts";
 import { log } from "./log.ts";
 import { burnsPayload, readBurnRows, readBurnsCsv } from "./store.ts";
 
+function corsHeaders(): Record<string, string> {
+  return {
+    "access-control-allow-origin": "*",
+    "access-control-allow-methods": "GET, OPTIONS",
+    "access-control-allow-headers": "accept, content-type",
+    "cache-control": "no-store",
+  };
+}
+
 function authorize(request: Request): string | null {
   const key = (process.env.SERVICE_API_KEY ?? "").trim();
   if (!key) return null;
@@ -45,9 +54,23 @@ const app = new Elysia()
       paymaster: cfg.cdp.usePaymaster,
     };
   })
-  .get("/burns", async () => burnsPayload(await readBurnRows()))
+  .options("/burns", ({ set }) => {
+    set.headers = corsHeaders();
+    return "";
+  })
+  .options("/burns.csv", ({ set }) => {
+    set.headers = corsHeaders();
+    return "";
+  })
+  .get("/burns", async ({ set }) => {
+    set.headers = corsHeaders();
+    return burnsPayload(await readBurnRows());
+  })
   .get("/burns.csv", async ({ set }) => {
-    set.headers["content-type"] = "text/csv; charset=utf-8";
+    set.headers = {
+      ...corsHeaders(),
+      "content-type": "text/csv; charset=utf-8",
+    };
     return readBurnsCsv();
   })
   .post("/run", async ({ request, set }) => {
