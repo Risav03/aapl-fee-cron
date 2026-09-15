@@ -19,7 +19,7 @@ const app = new Elysia()
   .use(
     cron({
       name: "aapl-fee-sweep",
-      pattern: "0 */6 * * *",
+      pattern: "0 */1 * * *",
       async run() {
         if (isSweepRunning()) {
           log("cron tick skipped — sweep already running");
