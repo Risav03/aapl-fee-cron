@@ -4,6 +4,7 @@ import { Elysia } from "elysia";
 import { config, configReady } from "./config.ts";
 import { isSweepRunning, runSweep } from "./job.ts";
 import { log } from "./log.ts";
+import { burnsPayload, readBurnRows, readBurnsCsv } from "./store.ts";
 
 function authorize(request: Request): string | null {
   const key = (process.env.SERVICE_API_KEY ?? "").trim();
@@ -43,6 +44,11 @@ const app = new Elysia()
       treasury: cfg.treasury,
       paymaster: cfg.cdp.usePaymaster,
     };
+  })
+  .get("/burns", async () => burnsPayload(await readBurnRows()))
+  .get("/burns.csv", async ({ set }) => {
+    set.headers["content-type"] = "text/csv; charset=utf-8";
+    return readBurnsCsv();
   })
   .post("/run", async ({ request, set }) => {
     const ready = configReady();

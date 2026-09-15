@@ -27,12 +27,26 @@ export type Split = {
   treasury: bigint;
 };
 
+export const DEAD = "0x000000000000000000000000000000000000dEaD" as Address;
+const SETTLE_DELAY_MS = 5_000;
+
+export type BuyBurnLeg = {
+  amount: string;
+  token: string;
+  txHash?: string;
+  tokenOut?: string;
+  tokenOutRaw?: string;
+  tokenDecimals?: number;
+  burnTxHash?: string;
+  skipped?: string;
+};
+
 export type AllocateResult = {
   skipped?: string;
   aapl: string;
   aaplRaw: string;
-  buy25?: { amount: string; token: string; txHash?: string };
-  buy15?: { amount: string; token: string; txHash?: string };
+  buy25?: BuyBurnLeg;
+  buy15?: BuyBurnLeg;
   treasury?: { amount: string; to: string; txHash?: string };
 };
 
@@ -172,6 +186,77 @@ async function swapAapl(tokenOut: Address, amountIn: bigint): Promise<string> {
   throw new Error(lastError);
 }
 
+async function waitForBalanceChange(
+  token: Address,
+  owner: Address,
+  previous: bigint,
+): Promise<bigint> {
+  let balance = await readTokenBalance(token, owner);
+  for (let i = 0; i < 8 && balance <= previous; i++) {
+    await sleep(400 + i * 200);
+    balance = await readTokenBalance(token, owner);
+  }
+  return balance;
+}
+
+async function burnToken(token: Address, amount: bigint): Promise<string> {
+  const sent = await sendCalls([
+    {
+      to: token,
+      data: encodeFunctionData({
+        abi: erc20Abi,
+        functionName: "transfer",
+        args: [DEAD, amount],
+      }),
+    },
+  ]);
+  return sent.txHash;
+}
+
+export async function burnHeldToken(token: Address): Promise<{
+  amount: bigint;
+  formatted: string;
+  decimals: number;
+  burnTxHash?: string;
+  skipped?: string;
+}> {
+  const wallet = config().feeWallet;
+  const decimals = await tokenDecimals(token);
+  const balance = await readTokenBalance(token, wallet);
+  const formatted = formatUnits(balance, decimals);
+  if (balance <= 0n) {
+    return { amount: 0n, formatted, decimals, skipped: "zero balance" };
+  }
+  log(`burning ${formatted} ${token}`);
+  const burnTxHash = await burnToken(token, balance);
+  return { amount: balance, formatted, decimals, burnTxHash };
+}
+
+async function swapThenBurn(tokenOut: Address, amountIn: bigint): Promise<BuyBurnLeg> {
+  const cfg = config();
+  const aaplDecimals = await tokenDecimals(cfg.aaplToken);
+  const wallet = cfg.feeWallet;
+  const before = await readTokenBalance(tokenOut, wallet);
+  const txHash = await swapAapl(tokenOut, amountIn);
+  await sleep(SETTLE_DELAY_MS);
+  await waitForBalanceChange(tokenOut, wallet, before);
+  const burned = await burnHeldToken(tokenOut);
+  const leg: BuyBurnLeg = {
+    amount: formatUnits(amountIn, aaplDecimals),
+    token: tokenOut,
+    txHash,
+    tokenOut: burned.formatted,
+    tokenOutRaw: burned.amount.toString(),
+    tokenDecimals: burned.decimals,
+    burnTxHash: burned.burnTxHash,
+    skipped: burned.skipped,
+  };
+  if (!burned.burnTxHash) {
+    log(`burn skipped after swap ${txHash}: ${burned.skipped ?? "no balance"}`);
+  }
+  return leg;
+}
+
 async function transferAapl(to: Address, amount: bigint): Promise<string> {
   const sent = await sendCalls([
     {
@@ -195,11 +280,13 @@ export async function allocateAapl(): Promise<AllocateResult> {
 
   if (balance < min) {
     log(`allocate skipped — AAPLc ${formatted} below min ${formatUnits(min, decimals)}`);
-    return {
+    const result: AllocateResult = {
       skipped: `AAPLc ${formatted} below min`,
       aapl: formatted,
       aaplRaw: balance.toString(),
     };
+    await burnLeftoverBuyTokens(result);
+    return result;
   }
 
   const split = splitAapl(balance);
@@ -213,20 +300,10 @@ export async function allocateAapl(): Promise<AllocateResult> {
   };
 
   if (split.buy25 > 0n) {
-    const txHash = await swapAapl(cfg.buyToken25, split.buy25);
-    result.buy25 = {
-      amount: formatUnits(split.buy25, decimals),
-      token: cfg.buyToken25,
-      txHash,
-    };
+    result.buy25 = await swapThenBurn(cfg.buyToken25, split.buy25);
   }
   if (split.buy15 > 0n) {
-    const txHash = await swapAapl(cfg.buyToken15, split.buy15);
-    result.buy15 = {
-      amount: formatUnits(split.buy15, decimals),
-      token: cfg.buyToken15,
-      txHash,
-    };
+    result.buy15 = await swapThenBurn(cfg.buyToken15, split.buy15);
   }
   if (split.treasury > 0n) {
     const txHash = await transferAapl(cfg.treasury, split.treasury);
@@ -236,5 +313,38 @@ export async function allocateAapl(): Promise<AllocateResult> {
       txHash,
     };
   }
+  await burnLeftoverBuyTokens(result);
   return result;
+}
+
+async function burnLeftoverBuyTokens(result: AllocateResult): Promise<void> {
+  const cfg = config();
+  if (!result.buy25?.burnTxHash) {
+    const burned = await burnHeldToken(cfg.buyToken25);
+    if (burned.burnTxHash) {
+      result.buy25 = {
+        amount: result.buy25?.amount ?? "0",
+        token: cfg.buyToken25,
+        txHash: result.buy25?.txHash,
+        tokenOut: burned.formatted,
+        tokenOutRaw: burned.amount.toString(),
+        tokenDecimals: burned.decimals,
+        burnTxHash: burned.burnTxHash,
+      };
+    }
+  }
+  if (!result.buy15?.burnTxHash) {
+    const burned = await burnHeldToken(cfg.buyToken15);
+    if (burned.burnTxHash) {
+      result.buy15 = {
+        amount: result.buy15?.amount ?? "0",
+        token: cfg.buyToken15,
+        txHash: result.buy15?.txHash,
+        tokenOut: burned.formatted,
+        tokenOutRaw: burned.amount.toString(),
+        tokenDecimals: burned.decimals,
+        burnTxHash: burned.burnTxHash,
+      };
+    }
+  }
 }
