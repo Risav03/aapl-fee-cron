@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { AllocateResult, BuyBurnLeg } from "./allocate.ts";
+import { backfillBurnsFromChain } from "./history.ts";
 import { log, logError } from "./log.ts";
 
 export type BurnKind = "buy25" | "buy15";
@@ -133,20 +134,83 @@ function toRow(kind: BurnKind, at: string, leg: BuyBurnLeg): BurnRow {
   };
 }
 
-export async function readBurnRows(): Promise<BurnRow[]> {
+let cached: BurnRow[] | null = null;
+let loading: Promise<BurnRow[]> | null = null;
+
+function mergeRows(rows: BurnRow[]): BurnRow[] {
+  const byTx = new Map<string, BurnRow>();
+  for (const row of rows) {
+    const key = row.burnTx.toLowerCase();
+    const prev = byTx.get(key);
+    if (!prev) {
+      byTx.set(key, row);
+      continue;
+    }
+    byTx.set(key, {
+      ...prev,
+      ...row,
+      swapTx: row.swapTx || prev.swapTx,
+      aaplIn: row.aaplIn || prev.aaplIn,
+      at: prev.at && prev.at <= row.at ? prev.at : row.at,
+    });
+  }
+  return [...byTx.values()].sort((a, b) => a.at.localeCompare(b.at));
+}
+
+async function readFileRows(): Promise<BurnRow[]> {
   try {
     const text = await readFile(burnsCsvPath(), "utf8");
     const lines = text.trim().split(/\r?\n/).filter(Boolean);
     const start = lines[0]?.startsWith("kind,") ? 1 : 0;
-    const byTx = new Map<string, BurnRow>();
+    const rows: BurnRow[] = [];
     for (const line of lines.slice(start)) {
       const row = parseRow(line);
-      if (!row) continue;
-      byTx.set(row.burnTx.toLowerCase(), row);
+      if (row) rows.push(row);
     }
-    return [...byTx.values()].sort((a, b) => a.at.localeCompare(b.at));
+    return rows;
   } catch {
     return [];
+  }
+}
+
+async function persist(rows: BurnRow[]): Promise<string> {
+  const filePath = burnsCsvPath();
+  await mkdir(path.dirname(filePath), { recursive: true });
+  const body = `${HEADER}\n${rows.map(serialize).join("\n")}${rows.length ? "\n" : ""}`;
+  await writeFile(filePath, body, "utf8");
+  cached = rows;
+  return filePath;
+}
+
+export async function readBurnRows(): Promise<BurnRow[]> {
+  if (cached) return cached;
+  if (loading) return loading;
+  loading = (async () => {
+    const fromFile = await readFileRows();
+    let chain: BurnRow[] = [];
+    try {
+      chain = await backfillBurnsFromChain();
+    } catch (err) {
+      logError("on-chain burn backfill failed", err);
+    }
+    const rows = mergeRows([...fromFile, ...chain]);
+    if (rows.length > fromFile.length) {
+      try {
+        await persist(rows);
+        log(`backfilled burns.csv to ${rows.length} row(s)`);
+      } catch (err) {
+        logError("burns.csv persist after backfill failed", err);
+        cached = rows;
+      }
+    } else {
+      cached = rows;
+    }
+    return cached ?? rows;
+  })();
+  try {
+    return await loading;
+  } finally {
+    loading = null;
   }
 }
 
@@ -168,22 +232,10 @@ export async function recordBurns(
 
   try {
     const existing = await readBurnRows();
-    const byTx = new Map(existing.map((row) => [row.burnTx.toLowerCase(), row]));
-    let added = 0;
-    for (const row of incoming) {
-      const key = row.burnTx.toLowerCase();
-      if (byTx.has(key)) continue;
-      byTx.set(key, row);
-      added += 1;
-    }
-    const rows = [...byTx.values()].sort((a, b) => a.at.localeCompare(b.at));
-    const filePath = burnsCsvPath();
-    await mkdir(path.dirname(filePath), { recursive: true });
-    await writeFile(
-      filePath,
-      `${HEADER}\n${rows.map(serialize).join("\n")}${rows.length ? "\n" : ""}`,
-      "utf8",
-    );
+    const before = existing.length;
+    const rows = mergeRows([...existing, ...incoming]);
+    const filePath = await persist(rows);
+    const added = rows.length - before;
     log(`stored ${added} burn(s) in ${filePath} (${rows.length} total)`);
     return { path: filePath, added, total: rows.length };
   } catch (err) {

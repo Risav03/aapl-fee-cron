@@ -3,7 +3,7 @@ import { Elysia } from "elysia";
 
 import { config, configReady } from "./config.ts";
 import { isSweepRunning, runSweep } from "./job.ts";
-import { log } from "./log.ts";
+import { log, logError } from "./log.ts";
 import { burnsPayload, readBurnRows, readBurnsCsv } from "./store.ts";
 
 function corsHeaders(): Record<string, string> {
@@ -104,3 +104,6 @@ const port = (() => {
 
 app.listen(port);
 log(`aapl-fee-cron listening on :${port}`);
+void readBurnRows()
+  .then((rows) => log(`burns ready (${rows.length} row${rows.length === 1 ? "" : "s"})`))
+  .catch((err) => logError("burns warmup failed", err));
