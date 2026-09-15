@@ -1,4 +1,4 @@
-import { encodeFunctionData, getAddress, type Address } from "viem";
+import { encodeFunctionData, erc20Abi, formatUnits, getAddress, type Address } from "viem";
 
 import { feeLockerAbi } from "./abis.ts";
 import { publicClient } from "./chain.ts";
@@ -18,6 +18,15 @@ export type ClaimResult = {
   coins: number;
   collect: string[];
   claimed: string[];
+  txHash?: string;
+};
+
+export type VaultTransferResult = {
+  skipped?: string;
+  token: string;
+  to: string;
+  amount: string;
+  amountRaw: string;
   txHash?: string;
 };
 
@@ -175,6 +184,68 @@ export async function claimFees(): Promise<ClaimResult> {
     coins: plan.coins,
     collect: plan.collect,
     claimed: plan.claimed,
+    txHash: sent.txHash,
+  };
+}
+
+async function readErc20Balance(token: Address, owner: Address): Promise<bigint> {
+  return publicClient().readContract({
+    address: token,
+    abi: erc20Abi,
+    functionName: "balanceOf",
+    args: [owner],
+  });
+}
+
+async function tokenDecimals(token: Address): Promise<number> {
+  try {
+    const decimals = await publicClient().readContract({
+      address: token,
+      abi: erc20Abi,
+      functionName: "decimals",
+    });
+    return Number(decimals) || 18;
+  } catch {
+    return 18;
+  }
+}
+
+/** Send claimed ISTONKS to the vault before AAPL buy/burn so it is not burned as leftover. */
+export async function sendIstonksToVault(): Promise<VaultTransferResult> {
+  const cfg = config();
+  const token = cfg.istonksToken;
+  const to = cfg.vault;
+  const wallet = cfg.feeWallet;
+  const decimals = await tokenDecimals(token);
+  const balance = await readErc20Balance(token, wallet);
+  const amount = formatUnits(balance, decimals);
+  if (balance <= 0n) {
+    log("ISTONKS vault transfer skipped — zero balance");
+    return {
+      skipped: "zero ISTONKS",
+      token,
+      to,
+      amount,
+      amountRaw: "0",
+    };
+  }
+
+  log(`sending ${amount} ISTONKS to vault ${to}`);
+  const sent = await sendCalls([
+    {
+      to: token,
+      data: encodeFunctionData({
+        abi: erc20Abi,
+        functionName: "transfer",
+        args: [to, balance],
+      }),
+    },
+  ]);
+  return {
+    token,
+    to,
+    amount,
+    amountRaw: balance.toString(),
     txHash: sent.txHash,
   };
 }

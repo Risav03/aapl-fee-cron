@@ -1,5 +1,5 @@
 import { allocateAapl, type AllocateResult } from "./allocate.ts";
-import { claimFees, type ClaimResult } from "./claim.ts";
+import { claimFees, sendIstonksToVault, type ClaimResult, type VaultTransferResult } from "./claim.ts";
 import { log, logError, sleep } from "./log.ts";
 import { recordBurns, type StoreResult } from "./store.ts";
 
@@ -8,6 +8,7 @@ export type SweepResult = {
   finishedAt: string;
   skipped?: string;
   claim?: ClaimResult;
+  vault?: VaultTransferResult;
   allocate?: AllocateResult;
   store?: StoreResult;
   error?: string;
@@ -34,12 +35,15 @@ export async function runSweep(): Promise<SweepResult> {
   try {
     const claim = await claimFees();
     if (claim.txHash) await sleep(4_000);
+    const vault = await sendIstonksToVault();
+    if (vault.txHash) await sleep(4_000);
     const allocate = await allocateAapl();
     const store = await recordBurns(allocate, startedAt);
     const result: SweepResult = {
       startedAt,
       finishedAt: new Date().toISOString(),
       claim,
+      vault,
       allocate,
       store,
     };

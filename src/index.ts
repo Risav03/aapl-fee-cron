@@ -51,6 +51,8 @@ const app = new Elysia()
       ok: true,
       feeWallet: cfg.feeWallet,
       treasury: cfg.treasury,
+      vault: cfg.vault,
+      istonksToken: cfg.istonksToken,
       paymaster: cfg.cdp.usePaymaster,
     };
   })
